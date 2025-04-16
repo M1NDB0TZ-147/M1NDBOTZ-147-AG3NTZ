@@ -1,4 +1,8 @@
 import logging
+import os
+import json
+from datetime import datetime
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -74,7 +78,9 @@ SAFETY & RESPONSIBILITY
     async def on_enter(self):
         # when the agent is added to the session, it'll generate a reply
         # according to its instructions
-        self.session.generate_reply(instructions="MindExpander, the idea prism is primed. Which new entity shall we conjure?")
+        await self.session.generate_reply(
+            instructions="MindExpander, the idea prism is primed. Which new entity shall we conjure?"
+        )
 
     # all functions annotated with @function_tool will be passed to the LLM when this
     # agent is active
@@ -111,16 +117,20 @@ def prewarm(proc: JobProcess):
 
 
 async def entrypoint(ctx: JobContext):
+    """Main entrypoint for the LiveKit Agent worker."""
+
     # each log entry will include these fields
     ctx.log_context_fields = {
         "room": ctx.room.name,
         "user_id": "your user_id",
     }
+
+    # Connect to LiveKit first so ctx.room is ready for file‑naming, etc.
     await ctx.connect()
 
+    # Create the AgentSession (voice pipeline)
     session = AgentSession(
         vad=ctx.proc.userdata["vad"],
-        # any combination of STT, LLM, TTS, or realtime API can be used
         llm=openai.LLM(model="gpt-4.1"),
         stt=deepgram.STT(model="nova-3", language="multi"),
         tts=openai.TTS(voice="fable"),
@@ -128,7 +138,26 @@ async def entrypoint(ctx: JobContext):
         turn_detection=MultilingualModel(),
     )
 
-    # log metrics as they are emitted, and total usage after session is over
+    # ---- TRANSCRIPT PERSISTENCE -------------------------------------------
+    # Save the full conversation history (session.history) once the room closes
+    async def write_transcript():
+        current_date = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Save into a relative ./logs directory next to this script
+        logs_dir = Path(__file__).parent / "logs"
+        logs_dir.mkdir(exist_ok=True)
+
+        outfile = logs_dir / f"transcript_{ctx.room.name}_{current_date}.json"
+        with open(outfile, "w", encoding="utf-8") as f:
+            json.dump(session.history.to_dict(), f, indent=2)
+
+        logger.info(f"Transcript for {ctx.room.name} saved to {outfile}")
+
+    # Register the callback so it runs automatically on shutdown
+    ctx.add_shutdown_callback(write_transcript)
+    # -----------------------------------------------------------------------
+
+    # Collect usage metrics
     usage_collector = metrics.UsageCollector()
 
     @session.on("metrics_collected")
@@ -140,7 +169,6 @@ async def entrypoint(ctx: JobContext):
         summary = usage_collector.get_summary()
         logger.info(f"Usage: {summary}")
 
-    # shutdown callbacks are triggered when the session is over
     ctx.add_shutdown_callback(log_usage)
 
     # wait for a participant to join the room
