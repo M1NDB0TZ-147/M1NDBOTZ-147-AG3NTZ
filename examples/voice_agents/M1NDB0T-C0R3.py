@@ -1,7 +1,7 @@
 import logging
-import os
 import json
 from datetime import datetime
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -22,14 +22,16 @@ from livekit.agents.voice import MetricsCollectedEvent
 from livekit.plugins import deepgram, openai, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
-# Uncomment to enable Krisp background voice/noise cancellation (Linux & macOS only)
+# Uncomment to enable Krisp background voice/noise cancellation (LiveKit Cloud only)
 # from livekit.plugins import noise_cancellation
 
-logger = logging.getLogger("mindbot-agent")
+logger = logging.getLogger("basic-agent")
 load_dotenv()
 
 
 class MindBotAgent(Agent):
+    """MindBot – triangular‑eyed robo‑oracle."""
+
     def __init__(self) -> None:
         super().__init__(
             instructions="""
@@ -73,12 +75,14 @@ SAFETY & RESPONSIBILITY
         )
 
     async def on_enter(self):
-        # Generate a greeting when the agent joins the session
-        self.session.generate_reply(
-            instructions="MindExpander, the idea prism is primed. Which new entity shall we conjure?"
+        # greet only after the LLM pipeline is ready
+        await self.session.generate_reply(
+            instructions="MindExpander, the idea prism is primed. Which new entity shall we conjure?",
         )
 
-    # Tools --------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 🔧  Example function tool (kept from template)                      
+    # ------------------------------------------------------------------
     @function_tool
     async def lookup_weather(
         self,
@@ -87,39 +91,29 @@ SAFETY & RESPONSIBILITY
         latitude: str,
         longitude: str,
     ):
-        """Look up weather information for a given location.
-
-        Args:
-            location: The location they are asking for
-            latitude: The latitude of the location (estimated automatically)
-            longitude: The longitude of the location (estimated automatically)
-        """
-        logger.info(f"Looking up weather for {location}")
-        return {
-            "weather": "sunny",
-            "temperature": 70,
-            "location": location,
-        }
+        """Dummy weather lookup used to demonstrate function calling."""
+        logger.info("Looking up weather for %s", location)
+        return {"weather": "sunny", "temperature": 70, "location": location}
 
 
-# ---------------------------------------------------------------------------
-# Worker helpers
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# 🔥 Worker pre‑warm                                                    
+# ----------------------------------------------------------------------
 
 def prewarm(proc: JobProcess):
-    """Load Silero VAD once per worker for fast cold‑starts."""
     proc.userdata["vad"] = silero.VAD.load()
 
 
+# ----------------------------------------------------------------------
+# 🚀 Worker entrypoint                                                  
+# ----------------------------------------------------------------------
 async def entrypoint(ctx: JobContext):
-    # Basic contextual fields added to every log record
-    ctx.log_context_fields = {
-        "room": ctx.room.name,
-        "user_id": "<unknown>",
-    }
+    # Every log entry will include these fields
+    ctx.log_context_fields = {"room": ctx.room.name, "user_id": "your user_id"}
 
     await ctx.connect()
 
+    # Build the voice pipeline
     session = AgentSession(
         vad=ctx.proc.userdata["vad"],
         llm=openai.LLM(model="gpt-4.1"),
@@ -128,9 +122,19 @@ async def entrypoint(ctx: JobContext):
         turn_detection=MultilingualModel(),
     )
 
-    # -------------------------------------------------------------------
-    # Usage metrics collection
-    # -------------------------------------------------------------------
+    # 1️⃣  --------  SAVE FULL TRANSCRIPT ON SHUTDOWN  -----------------
+    async def save_transcript():
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        logs_dir = Path(__file__).parent / "logs"
+        logs_dir.mkdir(exist_ok=True)
+        outfile = logs_dir / f"transcript_{ctx.room.name}_{ts}.json"
+        with outfile.open("w", encoding="utf-8") as fp:
+            json.dump(session.history.to_dict(), fp, indent=2)
+        logger.info("Transcript saved → %s", outfile)
+
+    ctx.add_shutdown_callback(save_transcript)
+
+    # 2️⃣  --------  COLLECT & LOG USAGE METRICS  ----------------------
     usage_collector = metrics.UsageCollector()
 
     @session.on("metrics_collected")
@@ -139,42 +143,17 @@ async def entrypoint(ctx: JobContext):
         usage_collector.collect(ev.metrics)
 
     async def log_usage():
-        summary = usage_collector.get_summary()
-        logger.info(f"Usage summary: {summary}")
+        logger.info("Usage summary: %s", usage_collector.get_summary())
 
     ctx.add_shutdown_callback(log_usage)
 
-    # -------------------------------------------------------------------
-    # Transcript persistence
-    # -------------------------------------------------------------------
-    transcript_dir = os.getenv("TRANSCRIPTS_DIR", "./logs")
-    os.makedirs(transcript_dir, exist_ok=True)
-
-    async def write_transcript():
-        """Dump the full session history to a JSON file on shutdown."""
-        current_date = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = os.path.join(
-            transcript_dir, f"transcript_{ctx.room.name}_{current_date}.json"
-        )
-        try:
-            with open(filename, "w", encoding="utf-8") as f:
-                json.dump(session.history.to_dict(), f, indent=2, ensure_ascii=False)
-            logger.info(f"Transcript saved to {filename}")
-        except Exception as exc:
-            logger.exception("Failed to write transcript", exc_info=exc)
-
-    ctx.add_shutdown_callback(write_transcript)
-
-    # -------------------------------------------------------------------
-    # Wait for the participant and start the session
-    # -------------------------------------------------------------------
+    # Wait for a participant before starting the session
     await ctx.wait_for_participant()
 
     await session.start(
         agent=MindBotAgent(),
         room=ctx.room,
         room_input_options=RoomInputOptions(
-            # Example: enable Krisp BVC noise cancellation
             # noise_cancellation=noise_cancellation.BVC(),
         ),
         room_output_options=RoomOutputOptions(transcription_enabled=True),
@@ -182,6 +161,4 @@ async def entrypoint(ctx: JobContext):
 
 
 if __name__ == "__main__":
-    cli.run_app(
-        WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm)
-    )
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
