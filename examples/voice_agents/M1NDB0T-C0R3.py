@@ -121,9 +121,9 @@ async def entrypoint(ctx: JobContext):
     session = AgentSession(
         vad=ctx.proc.userdata["vad"],
         # any combination of STT, LLM, TTS, or realtime API can be used
-        llm=openai.LLM(model="gpt-4o-mini"),
+        llm=openai.LLM(model="gpt-4.1"),
         stt=deepgram.STT(model="nova-3", language="multi"),
-        tts=openai.TTS(voice="ash"),
+        tts=openai.TTS(voice="fable"),
         # use LiveKit's turn detection model
         turn_detection=MultilingualModel(),
     )
